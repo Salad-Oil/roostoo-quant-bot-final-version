@@ -1,0 +1,48 @@
+[Unit]
+Description=Roostoo quant trading bot (HK vs AU vs IN Quant Trading Hackathon)
+Documentation=file:/opt/roostoo-quant-bot/README.md
+After=network-online.target
+Wants=network-online.target
+
+# Contain a crash loop. These are [Unit] directives on systemd >= 230; in
+# [Service] modern systemd logs "Unknown key name" and IGNORES them, which
+# silently left `Restart=always` with no rate limit at all.
+StartLimitIntervalSec=300
+StartLimitBurst=10
+
+[Service]
+Type=simple
+User=ubuntu
+WorkingDirectory=/opt/roostoo-quant-bot
+Environment=PYTHONUNBUFFERED=1
+# The bot reads its credentials from .env (mode 600, git-ignored).
+ExecStart=/usr/bin/python3 /opt/roostoo-quant-bot/run_live.py --env /opt/roostoo-quant-bot/.env
+
+# A 14-day unattended run on a spot instance: always come back.
+Restart=always
+RestartSec=15
+# `run_live.py` exits 3 when the portfolio kill switch has fired. That state is
+# persisted as halted, so a restart cannot recover anything -- without this,
+# `Restart=always` restarted the halted bot ~10 times (StartLimitBurst) before
+# systemd marked the unit failed, re-flattening an already-flat book each time.
+# Declaring 3 a success turns "deliberately halted, needs a human" into the clean
+# stop it is, while a real crash (any other status) still restarts.
+SuccessExitStatus=3
+RestartPreventExitStatus=3
+# Give the shutdown handler time to persist state. NOTE: do NOT add
+# --flatten-on-exit here -- a crash-loop would then liquidate the book every time
+# the unit restarts. Flatten only in a deliberate, attended stop.
+KillSignal=SIGTERM
+TimeoutStopSec=120
+
+# Journald keeps the console log; StructuredLogging is not needed.
+StandardOutput=journal
+StandardError=journal
+SyslogIdentifier=roostoo-bot
+
+# Contain a runaway bot: it is a 60-second loop, not a compute job.
+MemoryMax=512M
+CPUQuota=50%
+
+[Install]
+WantedBy=multi-user.target
