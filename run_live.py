@@ -231,10 +231,21 @@ def build_engine(cfg, seed: bool, data_dir: str, interval: str) -> TradingEngine
     client = build_client(cfg)
     journal = Journal(cfg.journal_dir)
     seed_paths: dict[str, str] = {}
-    if seed:
-        seed_paths = discover_seed_paths(data_dir, interval)
-    return TradingEngine(cfg, client=client, journal=journal, seed_paths=seed_paths)
 
+    if seed:
+        # First load normal seed data such as Binance history.
+        seed_paths = discover_seed_paths(data_dir, interval)
+
+        # Then prefer candles previously collected from the live Roostoo venue.
+        live_dir = Path(cfg.journal_dir) / cfg.state_dir_name / "candles"
+        seed_paths.update(discover_seed_paths(str(live_dir), interval))
+
+    return TradingEngine(
+        cfg,
+        client=client,
+        journal=journal,
+        seed_paths=seed_paths,
+    )
 
 def main(argv: list[str] | None = None) -> int:
     parser = argparse.ArgumentParser(description=__doc__, formatter_class=argparse.RawDescriptionHelpFormatter)

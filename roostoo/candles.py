@@ -216,7 +216,12 @@ class CandleBuilder:
     before being returned, so the strategy always sees it.
     """
 
-    def __init__(self, bar_seconds: int = 1800, max_bars: int = 500) -> None:
+    def __init__(
+        self,
+        bar_seconds: int = 1800,
+        max_bars: int = 500,
+        persist_dir: str | Path | None = None,
+    ) -> None:
         if bar_seconds < 1:
             raise ValueError("bar_seconds must be >= 1")
         self.bar_seconds = int(bar_seconds)
@@ -224,6 +229,9 @@ class CandleBuilder:
         self._history: dict[str, list[Candle]] = {}
         self._open: dict[str, dict[str, Any]] = {}
         self._last_cum_volume: dict[str, float] = {}
+        self._persist_dir = Path(persist_dir) if persist_dir is not None else None
+        if self._persist_dir is not None:
+            self._persist_dir.mkdir(parents=True, exist_ok=True)
         # Bars we had to synthesise because sampling missed a whole interval.
         self.gap_count = 0
 
@@ -259,6 +267,7 @@ class CandleBuilder:
             existing.append(candle)
         if len(existing) > self.max_bars:
             del existing[: len(existing) - self.max_bars]
+        self._persist_history(pair)
 
     # -- ingestion ------------------------------------------------------
     def add(
@@ -334,6 +343,65 @@ class CandleBuilder:
         series.append(candle)
         if len(series) > self.max_bars:
             del series[: len(series) - self.max_bars]
+        self._persist_history(pair)
+
+    def _persist_history(self, pair: str) -> None:
+        """Persist closed candle history so it survives a restart."""
+        if self._persist_dir is None:
+            return
+
+        series = self._history.get(pair, [])
+        if not series:
+            return
+
+        minutes = self.bar_seconds // 60
+        interval = f"{minutes}m" if self.bar_seconds % 60 == 0 else f"{self.bar_seconds}s"
+        filename = f"{pair.replace('/', '-')}_{interval}.csv"
+        path = self._persist_dir / filename
+        tmp = path.with_name(path.name + ".tmp")
+
+        try:
+            with tmp.open("w", newline="", encoding="utf-8") as handle:
+                writer = csv.DictWriter(handle, fieldnames=list(series[0].to_row().keys()))
+                writer.writeheader()
+                writer.writerows(candle.to_row() for candle in series)
+            tmp.replace(path)
+        except Exception as exc:
+            log.error("%s: could not persist candle history to %s: %s", pair, path, exc)
+
+    def patch_volumes(
+        self,
+        pair: str,
+        volumes: dict[int, tuple[float, float, int]],
+    ) -> int:
+        """Replace volume fields while preserving Roostoo OHLC prices."""
+        series = self._history.get(pair)
+        if not series:
+            return 0
+
+        changed = 0
+        for i, candle in enumerate(series):
+            data = volumes.get(candle.ts_ms)
+            if data is None:
+                continue
+
+            volume, quote_volume, trades = data
+            series[i] = Candle(
+                ts_ms=candle.ts_ms,
+                open=candle.open,
+                high=candle.high,
+                low=candle.low,
+                close=candle.close,
+                volume=volume,
+                quote_volume=quote_volume,
+                trades=trades,
+            )
+            changed += 1
+
+        if changed:
+            self._persist_history(pair)
+
+        return changed
 
     def _remember_cumulative(self, pair: str, cumulative_volume: Optional[float]) -> None:
         if cumulative_volume is None:

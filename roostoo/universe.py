@@ -395,10 +395,13 @@ class UniverseSelector:
 
         for rank, ticker in enumerate(quoted):
             pair = ticker.pair
-            inside = rank < cutoff
+
             inside_sticky = rank < sticky_cutoff and pair in held
-            if not inside and not inside_sticky:
-                out.rejected[pair] = f"rank {rank + 1} outside top {cutoff} by 24h turnover"
+
+            if len(out.selected) >= cutoff:
+                out.rejected[pair] = (
+                    f"enough qualified pairs selected; rank {rank + 1} by 24h turnover"
+                )
                 continue
 
             # 3. spread ceiling (Rule 1, clause 2): 0.1% == 10 bps.

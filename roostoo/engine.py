@@ -17,6 +17,7 @@ Design constraints this file has to satisfy at once:
 
 from __future__ import annotations
 
+import requests
 import logging
 import math
 import time
@@ -133,7 +134,11 @@ class TradingEngine:
         self.exchange_pairs: dict[str, TradePair] = {}
         self.tickers: dict[str, Ticker] = {}
         self.balances: dict[str, WalletBalance] = {}
-        self.builder = CandleBuilder(bar_seconds=cfg.bar_seconds, max_bars=cfg.history_window)
+        self.builder = CandleBuilder(
+            bar_seconds=cfg.bar_seconds,
+            max_bars=cfg.history_window,
+            persist_dir=Path(cfg.journal_dir) / cfg.state_dir_name / "candles",
+        )
         self.book = PositionBook(Path(cfg.journal_dir) / cfg.state_dir_name / "positions.json", cfg=cfg)
         self.sizer = PositionSizer(cfg)
         self.risk = RiskManager(cfg, self.sizer)
@@ -280,23 +285,26 @@ class TradingEngine:
                 log.warning("%s: refusing to seed: %s", pair, problem)
                 continue
             basis = ticker.mid / candles[-1].close - 1.0
-            if abs(basis) > SEED_TOLERANCE_PCT:
+            
+            now_ms = int(self.client.timestamp_ms())
+            age_ms = max(0, now_ms - candles[-1].ts_ms)
+            max_seed_age_ms = self.cfg.bar_seconds * 1000 *2
+
+            if age_ms > max_seed_age_ms:
                 self.journal.event(
                     "seed_rejected",
                     pair=pair,
-                    reason="history disagrees with venue price",
-                    basis=round(basis, 6),
-                    history_close=candles[-1].close,
-                    venue_mid=ticker.mid,
+                    reason="history is stale",
+                    age_ms=age_ms,
+                    last_ts_ms=candles[-1].ts_ms,
                 )
                 log.warning(
-                    "%s: refusing to seed, venue mid %.8f vs history close %.8f (basis %+.2f%%)",
+                    "%s: refusing to seed: latest history bar is %.1f minutes old",
                     pair,
-                    ticker.mid,
-                    candles[-1].close,
-                    basis * 100,
+                    age_ms / 60000.0,
                 )
                 continue
+
             self.builder.seed(pair, candles)
             self.journal.event(
                 "seed_applied",
@@ -455,6 +463,7 @@ class TradingEngine:
 
     def _decision_cycle(self, now_ms: int, current_bar: int, view: PortfolioView) -> None:
         self._refresh_universe(now_ms)
+        self._sync_binance_volumes()
         self._refresh_pending()
         ctx = self._context(now_ms, view)
         signals = self.strategy.generate(ctx)
@@ -578,6 +587,25 @@ class TradingEngine:
             elif not basis_report.source_ok:
                 log.warning("basis check unavailable (%s); proceeding on venue data alone", basis_report.error)
 
+        # Do not let cold pairs occupy Rule 1 slots.
+        required_bars = max(1, self.strategy.max_context_bars)
+        held_pairs = set(self.book.positions)
+
+        cold_pairs = {
+            pair: len(self.builder.history(pair))
+            for pair in candidates
+            if len(self.builder.history(pair)) < required_bars
+            and pair not in held_pairs
+        }
+
+        if cold_pairs:
+            candidates = {
+                pair: ticker
+                for pair, ticker in candidates.items()
+                if pair not in cold_pairs
+            }
+
+
         selection = self.selector.select(
             candidates,
             required_notional=self.cfg.depth_target_notional,
@@ -638,8 +666,63 @@ class TradingEngine:
                 price=ticker.mid,
                 bid=ticker.max_bid,
                 ask=ticker.min_ask,
-                cumulative_volume=ticker.unit_volume,
+                cumulative_volume=None,
             )
+
+    def _sync_binance_volumes(self) -> None:
+        """Use Binance 30m volume for RV while keeping Roostoo OHLC prices."""
+        for pair in self.universe:
+            try:
+                base, _ = pair.split("/", 1)
+                symbol = f"{base}USDT"
+
+                response = requests.get(
+                    "https://api.binance.com/api/v3/klines",
+                    params={
+                        "symbol": symbol,
+                        "interval": "30m",
+                        "limit": 60,
+                    },
+                    timeout=self.cfg.request_timeout_sec,
+                )
+                response.raise_for_status()
+                payload = response.json()
+
+                if not isinstance(payload, list):
+                    log.warning("%s: invalid Binance kline response", pair)
+                    continue
+
+                volumes: dict[int, tuple[float, float, int]] = {}
+
+                for row in payload:
+                    if not isinstance(row, list) or len(row) < 9:
+                        continue
+
+                    ts_ms = int(row[0])
+                    volume = float(row[5])
+                    quote_volume = float(row[7])
+                    trades = int(row[8])
+
+                    volumes[ts_ms] = (
+                        volume,
+                        quote_volume,
+                        trades,
+                    )
+
+                patched = self.builder.patch_volumes(pair, volumes)
+
+                log.info(
+                    "%s: patched %d candle volumes from Binance",
+                    pair,
+                    patched,
+                )
+
+            except Exception as exc:
+                log.warning(
+                    "%s: Binance volume sync failed: %s",
+                    pair,
+                    exc,
+                )
 
     def _safe_short_positions(self) -> Optional[list[Any]]:
         """The venue's open shorts, or ``None`` when the question went unanswered.
