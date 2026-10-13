@@ -41,6 +41,9 @@ class MeanReversionStrategy(Strategy):
             # --- Rule 2 -----------------------------------------------------
             "window": 48,  # 48 bars of 30min = 24h
             "z_entry": 2.8,  # the "X" of Rule 2
+            "enable_secondary_regime": False,
+            "secondary_z_entry": 1.8,
+            "secondary_after_hours": 24.0,
             "z_exit_long": -0.25,
             "z_exit_short": 0.25,
             "require_turn": True,  # Delta Z confirmation
@@ -146,7 +149,20 @@ class MeanReversionStrategy(Strategy):
     def _entries(self, ctx: MarketContext, need: int) -> list[Signal]:
         out: list[Signal] = []
         window = int(self.params["window"])
-        z_entry = float(self.params["z_entry"])
+        primary_z_entry = float(self.params["z_entry"])
+        secondary_z_entry = float(
+            self.params.get("secondary_z_entry", primary_z_entry)
+        )
+        secondary_after_ms = int(
+            float(self.params.get("secondary_after_hours", 24.0))
+            * 60 * 60 * 1000
+        )
+
+        if not hasattr(self, "_secondary_start_ts_ms"):
+            self._secondary_start_ts_ms = None
+
+        if not hasattr(self, "_last_entry_signal_ts_ms"):
+            self._last_entry_signal_ts_ms = None
         held = ctx.held_pairs()
 
         for pair in ctx.universe:
@@ -161,6 +177,30 @@ class MeanReversionStrategy(Strategy):
                 continue
 
             closes = ctx.closes(pair)
+            
+            series = ctx.series(pair)
+            current_ts_ms = series[-1].ts_ms
+
+            if self._secondary_start_ts_ms is None:
+                self._secondary_start_ts_ms = current_ts_ms
+
+            anchor_ts_ms = (
+                self._last_entry_signal_ts_ms
+                if self._last_entry_signal_ts_ms is not None
+                else self._secondary_start_ts_ms
+            )
+
+            secondary_active = (
+                bool(self.params.get("enable_secondary_regime", False))
+                and current_ts_ms - anchor_ts_ms >= secondary_after_ms
+            )
+
+            z_entry = (
+                secondary_z_entry
+                if secondary_active
+                else primary_z_entry
+            )
+
             z_series = ind.zscore_series(closes, window)
             if len(z_series) < 2:
                 self.note(pair, entry_skipped="z-score series too short")
@@ -180,6 +220,8 @@ class MeanReversionStrategy(Strategy):
                 adx=None if adx_value is None else round(adx_value, 2),
                 deviation=None if deviation is None else round(deviation, 5),
                 atr=None if atr_value is None else round(atr_value, 6),
+                entry_regime="secondary" if secondary_active else "primary",
+                active_z_entry=round(z_entry, 3),
             )
 
             # --- Rule 3: refuse to fade a trend -------------------------
@@ -219,6 +261,8 @@ class MeanReversionStrategy(Strategy):
 
             meta = self._meta(pair, z_now, z_prev, adx_value, atr_value, ctx.series(pair))
             meta["deviation"] = deviation
+            meta["entry_regime"] = "secondary" if secondary_active else "primary"
+            meta["active_z_entry"] = z_entry
             if long_trigger:
                 out.append(
                     Signal(
@@ -247,6 +291,8 @@ class MeanReversionStrategy(Strategy):
                 )
             else:
                 self.note(pair, entry_skipped=f"no trigger (Z {z_prev:+.2f} -> {z_now:+.2f})")
+        if out:
+            self._last_entry_signal_ts_ms = current_ts_ms
         return out
 
     # ------------------------------------------------------------------
