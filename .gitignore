@@ -38,3 +38,16 @@ live_seed_data/
 journal/
 __pycache__/
 *.pyc
+
+# AWS live/private files
+.env
+.env.before_secondary
+*.log
+*.bak
+*.save
+*.before_*
+all_seed_data/
+live_seed_data/
+journal/
+__pycache__/
+*.pyc
