@@ -90,9 +90,10 @@ SHORT  Z[t-1] <= -X   and   Z[t] - Z[t-1] < -min_delta_z
 
 So a long is taken when the z-score was already `X` standard deviations *above*
 the mean and is still moving up. `X` is `z_entry`, 2.8 in the code and 2.0 in the
-shipped template. `min_delta_z` (0.5) is the confirmation that it is still moving
-the same way; `require_turn` in the source is a misleading name for it, because the
-confirmation asks for continuation rather than a reversal.
+shipped template. The confirmation is `require_continuation` (`|dZ| > min_delta_z`,
+0.5): it asks for the move to still be going, not to turn. That setting used to be
+called `require_turn`, which said the opposite of what it does; the old key is
+still accepted if you have it in a `.env`, and the new one wins when both are set.
 
 Two gates then apply. `ADX(14)` must be below `adx_max` (20 in the code, 25 in the
 template, and 25 in the rulebook), so the bot stays out of the strongest trends.
@@ -143,14 +144,12 @@ A few things that table does not say.
 - The drawdown column is in-sample, because that is what we tabulated. We are not
   claiming an out-of-sample drawdown improvement from this table.
 
-**One thing this repository gets wrong about itself.** The module docstring at the
-top of `roostoo/strategies/mean_reversion.py` still describes the *fade* reading
-(`LONG entry: Z[t-1] <= -X`), and the `reason=` strings attached to the entry and
-exit signals repeat the same reversed comparisons, so a journal line can disagree
-with the order it explains. The executable conditions are the momentum ones quoted
-above. We left the code alone and flagged it here and in
-[`docs/FINDINGS.md`](docs/FINDINGS.md) section 9 rather than quietly editing a
-snapshot after the fact.
+**A stale description you may still find in older output.** The module docstring
+and the `reason=` strings attached to the entry and exit signals were copied from
+the *fade* version and described the opposite reading, so a journal line could
+contradict the order it explained. Both are corrected here; the executable
+conditions were always the momentum ones quoted above, so no result changes. Any
+journal or report written before that fix still shows the old wording.
 
 ### Exits and sizing
 
@@ -487,9 +486,6 @@ differ in reality onto the same printed value.
   cell is positive (+2.65%), from the strictest parameter set, which is also the one
   that trades least. Every entry threshold the fold test covers loses in four of
   five folds, so we treat that cell as noise rather than a lead.
-- The strategy module's docstring and the journal `reason=` strings describe the
-  opposite entry reading from the one the code executes. The executable conditions
-  are momentum. See [Which way round](#which-way-round).
 - Live execution has not been validated end to end. Signing, clock sync and universe
   selection are verified; real fills, the live flatten path and a multi-day
   unattended run are not. The state-safety tests pin what happens when the stored
@@ -567,11 +563,19 @@ continues on defaults, but a book that was never successfully loaded is never
 overwritten, and state belonging to another run mode or venue is refused for writing
 as well as for reading.
 
-CI runs on every push and pull request: the unit suite on Python 3.10 and 3.13, a
-compile pass, a check that text files are BOM-free UTF-8, a configuration test that
-a missing key is rejected, and two secret scanners, one over the working tree and
-one over git history. `main` is protected by a ruleset requiring a pull request, one
-approval and a green `ci` check.
+CI runs on every push and pull request. The `test` job runs on Python 3.9, which is
+what the EC2 box has: the unit suite, a byte-compile of every module, a check that
+text files are BOM-free UTF-8 with no re-encoding damage, an assertion that a
+missing credential is rejected, two cycles of the mock loop, and a backtest against
+the committed sample data. A separate job runs two independent secret scanners: the
+project's own over the full history reachable from any ref, and gitleaks over the
+pushed range. A small `ci` job collapses the matrix into the single status name a
+branch ruleset would require, because a matrix job reports as `test (3.9)` and a
+ruleset asking for `ci` would otherwise wait forever.
+
+One gap the workflow itself records: `secret-scan` is deliberately not a required
+check, so a credential can still be merged into `main` until someone adds it. Worth
+doing before the submission freezes.
 
 ## License
 

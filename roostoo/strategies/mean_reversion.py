@@ -1,16 +1,29 @@
-"""Rules 2 and 3 -- the 30-minute mean-reversion core.
+"""Rules 2 and 3 -- the 30-minute z-score core.
 
-Rule 2, restated precisely::
+The module keeps its historical name. What it implements is the **momentum**
+reading of Rule 2, not the mean-reversion one: Rule 2's clause reads
+"Z[t-1] >= X and Delta Z < 0", which mixes a momentum level with a reversion
+sign, so it can be read two ways. ``docs/FINDINGS.md`` section 9 has the
+measurement behind this choice.
+
+Rule 2, restated as the code actually evaluates it::
 
     SMA48 = mean of the last 48 closes            (48 x 30min = 24h)
     Std48 = standard deviation of those closes
     Z     = (Close - SMA48) / Std48
 
-    LONG  entry:  Z[t-1] <= -X  AND  Z[t] > Z[t-1]     (stretched down, turning up)
-    SHORT entry:  Z[t-1] >= +X  AND  Z[t] < Z[t-1]     (stretched up, turning down)
-    Exit long  when Z >= -0.25 ; exit short when Z <= +0.25
+    LONG  entry:  Z[t-1] >= +X  and  Z[t] - Z[t-1] >  min_delta_z   (stretched up, still rising)
+    SHORT entry:  Z[t-1] <= -X  and  Z[t] - Z[t-1] < -min_delta_z   (stretched down, still falling)
+    LONG  exit:   Z <= z_exit_long      (code default -0.25)
+    SHORT exit:   Z >= z_exit_short     (code default +0.25)
 
-Rule 3: only take those entries when ``ADX(14) < 25``.
+The exit levels are what make the entry and the exit a matched pair: a long enters
+above ``+X`` and leaves at ``z_exit_long``, so how far the position has to travel
+is set by the two of them together. Change one without the other and the z-exit
+either never fires or fires on the next bar.
+
+Rule 3: only take those entries when ``ADX(14) < adx_max`` -- 25 in the rulebook,
+20 in this file's defaults.
 """
 
 from __future__ import annotations
@@ -46,7 +59,14 @@ class MeanReversionStrategy(Strategy):
             "secondary_after_hours": 24.0,
             "z_exit_long": -0.25,
             "z_exit_short": 0.25,
-            "require_turn": True,  # Delta Z confirmation
+            #: Require the z-score to still be moving with the entry, i.e.
+            #: |dZ| > ``min_delta_z``. This asks for continuation, not a turn.
+            "require_continuation": True,
+            #: Historical name for ``require_continuation``. Kept so an existing
+            #: ``STRATEGY_PARAMS`` does not break: an unknown key is a hard error
+            #: here, by design. ``None`` means "not configured"; when it is set,
+            #: it wins over ``require_continuation``.
+            "require_turn": None,
             "min_delta_z": 0.5,
             # --- Rule 3 -----------------------------------------------------
             "adx_period": 14,
@@ -125,7 +145,7 @@ class MeanReversionStrategy(Strategy):
                         Signal(
                             pair,
                             EXIT_SHORT,
-                            reason=f"Z {z:+.2f} <= {self.params['z_exit_short']:+.2f} (mean reached)",
+                            reason=f"Z {z:+.2f} >= {self.params['z_exit_short']:+.2f} (mean reached)",
                             meta=self._meta(pair, z, None, None, atr_value, series),
                         )
                     )
@@ -137,13 +157,26 @@ class MeanReversionStrategy(Strategy):
                         Signal(
                             pair,
                             EXIT_LONG,
-                            reason=f"Z {z:+.2f} >= {self.params['z_exit_long']:+.2f} (mean reached)",
+                            reason=f"Z {z:+.2f} <= {self.params['z_exit_long']:+.2f} (mean reached)",
                             meta=self._meta(pair, z, None, None, atr_value, series),
                         )
                     )
                 else:
                     self.note(pair, long_exit_held_for=f"Z {z:+.2f}")
         return out
+
+    # ------------------------------------------------------------------
+    def _require_continuation(self) -> bool:
+        """Whether the ``|dZ|`` confirmation is required for an entry.
+
+        ``require_turn`` is the historical name for this setting and is still
+        honoured; it is only consulted when it has been configured explicitly,
+        which is why it defaults to ``None`` rather than to a boolean.
+        """
+        legacy = self.params.get("require_turn")
+        if legacy is not None:
+            return bool(legacy)
+        return bool(self.params["require_continuation"])
 
     # ------------------------------------------------------------------
     def _entries(self, ctx: MarketContext, need: int) -> list[Signal]:
@@ -254,7 +287,7 @@ class MeanReversionStrategy(Strategy):
             # --- Rule 2: the entry itself ------------------------------
             long_trigger = z_prev >= z_entry
             short_trigger = z_prev <= -z_entry
-            if self.params["require_turn"]:
+            if self._require_continuation():
                 min_dz = float(self.params.get("min_delta_z", 0.0))
                 long_trigger = long_trigger and delta_z > min_dz
                 short_trigger = short_trigger and delta_z < -min_dz
@@ -270,8 +303,8 @@ class MeanReversionStrategy(Strategy):
                         ENTER_LONG,
                         strength=self._strength(z_prev, z_entry),
                         reason=(
-                            f"Z {z_prev:+.2f} <= {-z_entry:+.2f} and turning (dZ {delta_z:+.3f}); "
-                            f"ADX {adx_value:.1f}" if adx_value is not None else f"Z {z_prev:+.2f} <= {-z_entry:+.2f}"
+                            f"Z {z_prev:+.2f} >= {z_entry:+.2f} and still rising (dZ {delta_z:+.3f}); "
+                            f"ADX {adx_value:.1f}" if adx_value is not None else f"Z {z_prev:+.2f} >= {z_entry:+.2f}"
                         ),
                         meta=meta,
                     )
@@ -283,8 +316,8 @@ class MeanReversionStrategy(Strategy):
                         ENTER_SHORT,
                         strength=self._strength(z_prev, z_entry),
                         reason=(
-                            f"Z {z_prev:+.2f} >= {z_entry:+.2f} and turning (dZ {delta_z:+.3f}); "
-                            f"ADX {adx_value:.1f}" if adx_value is not None else f"Z {z_prev:+.2f} >= {z_entry:+.2f}"
+                            f"Z {z_prev:+.2f} <= {-z_entry:+.2f} and still falling (dZ {delta_z:+.3f}); "
+                            f"ADX {adx_value:.1f}" if adx_value is not None else f"Z {z_prev:+.2f} <= {-z_entry:+.2f}"
                         ),
                         meta=meta,
                     )
