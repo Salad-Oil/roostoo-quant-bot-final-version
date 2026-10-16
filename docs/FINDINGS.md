@@ -371,12 +371,17 @@ confirm the real rate in the live journal before relying on it.
 
 Rule 2's entry can be read two ways. This snapshot implements the **momentum**
 reading: `long_trigger = z_prev >= z_entry`, so a long is taken when Z was
-stretched *up* and is still turning up, and the short is the mirror. There is no
+stretched *up* and still rising, and the short is the mirror. There is no
 `direction` switch in this tree; the reading is hardwired in the entry conditions
-of `roostoo/strategies/mean_reversion.py`. The module docstring still describes the
-older fade reading, and the `reason=` strings in the entry and exit signals repeat
-the stale comparisons, so a journal line can disagree with the order it explains.
-The executable conditions are the ones that matter, and they are momentum.
+of `roostoo/strategies/mean_reversion.py`.
+
+Two descriptions of that code used to say the opposite, all of them copied from
+the fade version: the module docstring, and the `reason=` strings on the entry and
+exit signals, whose comparisons were reversed so a journal line could contradict
+the order it explained. They are corrected now, and the executable conditions never
+changed, so no figure in this document moves. Journals and reports generated before
+the fix still carry the old wording, and `scripts/analyze_backtest.py` keeps
+matching on the `"mean reached"` substring, which was deliberately left alone.
 
 **Fetch a year or more before trusting this table.** It was produced from a 2-year
 dataset (35,042 x 30m bars per pair, 10 pairs) holding out the final 183 days, so
