@@ -563,11 +563,19 @@ continues on defaults, but a book that was never successfully loaded is never
 overwritten, and state belonging to another run mode or venue is refused for writing
 as well as for reading.
 
-CI runs on every push and pull request: the unit suite on Python 3.10 and 3.13, a
-compile pass, a check that text files are BOM-free UTF-8, a configuration test that
-a missing key is rejected, and two secret scanners, one over the working tree and
-one over git history. `main` is protected by a ruleset requiring a pull request, one
-approval and a green `ci` check.
+CI runs on every push and pull request. The `test` job runs on Python 3.9, which is
+what the EC2 box has: the unit suite, a byte-compile of every module, a check that
+text files are BOM-free UTF-8 with no re-encoding damage, an assertion that a
+missing credential is rejected, two cycles of the mock loop, and a backtest against
+the committed sample data. A separate job runs two independent secret scanners: the
+project's own over the full history reachable from any ref, and gitleaks over the
+pushed range. A small `ci` job collapses the matrix into the single status name a
+branch ruleset would require, because a matrix job reports as `test (3.9)` and a
+ruleset asking for `ci` would otherwise wait forever.
+
+One gap the workflow itself records: `secret-scan` is deliberately not a required
+check, so a credential can still be merged into `main` until someone adds it. Worth
+doing before the submission freezes.
 
 ## License
 
