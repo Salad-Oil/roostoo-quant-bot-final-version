@@ -17,10 +17,12 @@ Design constraints this file has to satisfy at once:
 
 from __future__ import annotations
 
-import requests
+import json
 import logging
 import math
 import time
+import urllib.parse
+import urllib.request
 from dataclasses import dataclass
 from pathlib import Path
 from typing import Any, Optional
@@ -670,23 +672,34 @@ class TradingEngine:
             )
 
     def _sync_binance_volumes(self) -> None:
-        """Use Binance 30m volume for RV while keeping Roostoo OHLC prices."""
+        """Use Binance 30m volume for RV while keeping Roostoo OHLC prices.
+
+        Standard library only, like every other outbound call in this project: a
+        bare host with no site-packages has to be able to run the bot. An earlier
+        version of this method used ``requests``, imported at module level, which
+        the deploy guide never installs -- so the whole package failed to import
+        on a clean box and took two test modules with it.
+        """
         for pair in self.universe:
             try:
                 base, _ = pair.split("/", 1)
                 symbol = f"{base}USDT"
 
-                response = requests.get(
-                    "https://api.binance.com/api/v3/klines",
-                    params={
-                        "symbol": symbol,
-                        "interval": "30m",
-                        "limit": 60,
-                    },
-                    timeout=self.cfg.request_timeout_sec,
+                query = urllib.parse.urlencode(
+                    {"symbol": symbol, "interval": "30m", "limit": 60}
                 )
-                response.raise_for_status()
-                payload = response.json()
+                request = urllib.request.Request(
+                    f"https://api.binance.com/api/v3/klines?{query}",
+                    headers={
+                        "User-Agent": "roostoo-quant-bot/1.0",
+                        "Accept": "application/json",
+                    },
+                )
+                with urllib.request.urlopen(
+                    request, timeout=self.cfg.request_timeout_sec
+                ) as response:
+                    body = response.read().decode("utf-8", errors="replace")
+                payload = json.loads(body)
 
                 if not isinstance(payload, list):
                     log.warning("%s: invalid Binance kline response", pair)
