@@ -17,11 +17,12 @@ python run_sweep.py --grid "@reports/grid_direction.json" --config-grid "@report
 
 > **Configuration note.** Sections 1–3 were produced with **Rule 4's deviation
 > gate enabled** (`enforce_min_deviation: true`), which is how those tables were
-> obtained. That gate belongs to another owner, so it now ships **disabled** and
-> the shipped default is worse on its own: in-sample −18.6% rather than −13.4%
-> (section 4 has the full comparison, and it is the same conclusion either way).
-> To reproduce these exact figures, add `"enforce_min_deviation": true` to
-> `STRATEGY_PARAMS`, or pass `--params '{"enforce_min_deviation": true}'`.
+> obtained. The code default in this tree is also `true`, so a bare run has the
+> gate on; `.env.example` does not set that key and instead lowers the floor, to
+> `min_abs_deviation` 0.6% against the code's 1.2%. If you pass `STRATEGY_PARAMS`
+> yourself, remember the gate, or you will measure the worse configuration on its
+> own: in-sample −18.6% rather than −13.4% (section 4 has the full comparison, and
+> it is the same conclusion either way).
 > On Windows/PowerShell, inline JSON is mangled by the shell — use the `@file`
 > form instead.
 >
@@ -33,8 +34,8 @@ python run_sweep.py --grid "@reports/grid_direction.json" --config-grid "@report
 > but re-run `run_sweep.py` before quoting an individual cell as current.
 
 **Headline: as specified, Rules 1–3 lose money — and the entry logic is not the
-reason.** Two configuration choices cause almost all of the damage, and both are
-owned by teammates (Rules 5 and the short leg of Rule 2).
+reason.** Two configuration choices cause almost all of the damage: the stop in
+Rule 5, and the short leg of Rule 2.
 
 ## 1. The default configuration loses
 
@@ -136,6 +137,13 @@ The plausible reason is drift. Over this sample crypto rose, so shorting a
 `+2σ` stretch is fighting a persistent trend, while the equivalent long trade is
 fading *into* it.
 
+**Read this section alongside section 9.** Every run here takes the *fade*
+reading: the short is sold into a `+2σ` stretch that is still rising. The code in
+this snapshot takes the *momentum* reading, where the short is the mirror of the
+long and sells a stretch that is still falling. The drift argument above does not
+carry over unchanged, so the short-leg result has to be re-measured under the
+momentum entry before it is acted on.
+
 ## 4. Rule 3 (ADX) and Rule 4 (deviation) both earn their place
 
 Full z-entry × ADX × deviation grid, in-sample return:
@@ -168,9 +176,12 @@ Two cautions on reading that band. It is bounded below by the ±10 reporting cla
 which saturates rather than scales, so configurations that differ in reality can
 print the same composite. And the OOS window in those runs is only **30 days**
 (1,441 bars of the 5,761), because that is how long the dataset was, which is too
-short to conclude anything about regime robustness. `data/` now holds **365 days
-for all ten tradable pairs**, so re-run it and check that the result holds in both
-a rising and a falling market before committing.
+short to conclude anything about regime robustness. Fetch a longer window before
+trusting that band — `python scripts/fetch_history.py --days 730 --symbols <pairs>`
+— then re-run it and check that the result holds in both a rising and a falling
+market. The tracked `data/` directory holds only two short synthetic samples, so a
+longer dataset has to be fetched; pin it with `--start`/`--end` if you intend to
+compare against a table here.
 
 ## 6. What to change first, in order of expected impact
 
@@ -358,21 +369,27 @@ confirm the real rate in the live journal before relying on it.
 
 ## 9. Direction: momentum beats reversion
 
-Rule 2's entry can be read two ways, and the code now makes the choice explicit
-through `direction` instead of leaving it implicit in a sign.
+Rule 2's entry can be read two ways. This snapshot implements the **momentum**
+reading: `long_trigger = z_prev >= z_entry`, so a long is taken when Z was
+stretched *up* and is still turning up, and the short is the mirror. There is no
+`direction` switch in this tree; the reading is hardwired in the entry conditions
+of `roostoo/strategies/mean_reversion.py`. The module docstring still describes the
+older fade reading, and the `reason=` strings in the entry and exit signals repeat
+the stale comparisons, so a journal line can disagree with the order it explains.
+The executable conditions are the ones that matter, and they are momentum.
 
-**`data/` now carries 365 days for every tradable pair, which is enough to re-run
-this at one year.** The table below was produced from a 2-year dataset (35,042 x
-30m bars, 10 pairs) and holds out the final 183 days, so the out-of-sample column
-is comparable across rows. Market data is git-ignored, so that particular set is
-not in the repository; `scripts/fetch_history.py --days 730` regenerates an
-equivalent one.
+**Fetch a year or more before trusting this table.** It was produced from a 2-year
+dataset (35,042 x 30m bars per pair, 10 pairs) holding out the final 183 days, so
+the out-of-sample column is comparable across rows. Market data is git-ignored and
+the tracked `data/` directory holds only two short synthetic samples, so that set
+has to be rebuilt: `scripts/fetch_history.py --days 730` produces an equivalent
+one.
 
 | policy | IS | OOS (183 days) | IS drawdown | round trips (IS/OOS) |
 |---|---|---|---|---|
 | reversion, shipped defaults | -19.65% | -13.72% | 19.85% | 315 / 498 |
-| reversion + the team's `.env` | -19.85% | **-19.25%** | 19.97% | 488 / 317 |
-| **momentum + the team's `.env`** | -19.32% | **-2.51%** | 19.71% | 310 / 145 |
+| reversion + the shipped `.env` | -19.85% | **-19.25%** | 19.97% | 488 / 317 |
+| **momentum + the shipped `.env`** | -19.32% | **-2.51%** | 19.71% | 310 / 145 |
 | **momentum + stricter entry params** | +2.65% | **-1.51%** | **3.05%** | 57 / 31 |
 
 `run_backtest.py --data-dir <2yr> --oos-frac 0.25`.
