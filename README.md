@@ -16,6 +16,20 @@ most of the project working out why, and the answer is not a parameter value. Th
 measurements are in [Backtest results](#backtest-results); the full record,
 including the ideas that failed, is in [`docs/FINDINGS.md`](docs/FINDINGS.md).
 
+## What is in the submission
+
+Everything written is Markdown, and there are four documents:
+
+| File | What it covers |
+|---|---|
+| `README.md` | how the portfolio is curated, the strategy and its measurements, the engine, fees, risk |
+| [`docs/FINDINGS.md`](docs/FINDINGS.md) | the research record: every measurement, including the ones that failed |
+| [`docs/SECURITY.md`](docs/SECURITY.md) | credential handling and incident response |
+| [`deploy/AWS_DEPLOY.md`](deploy/AWS_DEPLOY.md) | how the live deployment is run |
+
+No PDFs, slide decks or spreadsheets. The rest of the repository is the bot, its
+tests, and the data and reports those produced.
+
 ## Start here
 
 Runtime is Python 3.9+ and the standard library. There is nothing to install:
@@ -71,7 +85,21 @@ across four slots satisfies Rules 8, 9 and 10 at the same moment. The remaining
 40% stays in cash. That is a deliberate choice rather than idle capital: cash is
 what keeps the drawdown term of the score small.
 
+Curation therefore happens in two places. The Rule 1 screen decides what is
+*eligible* at all (24h turnover, spread ceiling, depth), and the caps decide how
+much of the eligible set we may hold. A coin can pass the screen and still never be
+traded, because there was no free slot, no risk budget left, or no signal.
+
 ## Strategy
+
+Rule 2 hands us a z-score over a 24-hour window, so the raw signal was not ours to
+choose. Everything around it was, and the question we kept asking is the one the
+measurements eventually answered: **is the move we are betting on bigger than what
+it costs to trade it?** A 2σ deviation reverting towards the mean is a move of
+roughly 0.1-0.3%, and a market round trip on this venue costs 0.30%. Those are the
+same order of magnitude. That is why fees are a design constraint here rather than
+an accounting detail, and why most of the effort went into *not* taking trades
+rather than finding more of them.
 
 ### The entry signal
 
@@ -268,6 +296,36 @@ Other failure modes we closed, each with a regression test:
 Every decision, rejection and reconciliation is appended to a JSONL journal plus a
 trades CSV, so a live result can be reconstructed afterwards.
 
+## One loop, end to end
+
+The quickest way into the code is to follow a single cycle. `run_live.py` reads
+`.env` into a `Config`, builds the client (or the in-process simulator), and hands
+both to `TradingEngine`, which then repeats this:
+
+1. **Refresh prices.** One `/v3/ticker` request covers the whole universe. Each
+   ticker feeds `CandleBuilder`, which has been assembling the current 30-minute bar
+   from those samples (`roostoo/candles.py`).
+2. **Reconcile, then protect.** Balances and open shorts are fetched and the local
+   book is reconciled against them (`engine._reconcile_positions`). Protective exits
+   are then evaluated on *every* pass, because Rule 5's stop is a price level and
+   does not wait for a bar to close (`risk.protective_exits`).
+3. **On a closed bar only, the strategy gets a turn.** The universe is selected
+   (Rule 1), `Strategy.generate` returns entry and exit signals, and each signal goes
+   through `RiskManager.evaluate` (cooldown, daily halt, the caps in Rules 8-10) and
+   `PositionSizer`, which turns the stop distance into a quantity.
+4. **Send, or refuse.** Orders leave through the client and are never blind-retried;
+   an unknown outcome is reconciled against the order history instead. A refusal is
+   recorded with its reason, so a quiet day can be explained afterwards.
+5. **Record.** Every decision, rejection and fill is appended to the JSONL journal
+   and the trades CSV, and `MetricTracker` keeps the equity marks the score is
+   computed from.
+
+The split is deliberate: `universe.py` decides *what* may be held, the strategy
+decides *when*, `risk.py` decides *how much* and *when to leave*, and `engine.py`
+owns the ordering between them. That is why [Risk rules](#risk-rules) can point at
+one file per rule, and why replacing the strategy does not mean touching the risk
+layer.
+
 ## Backtest results
 
 ### The ablation
@@ -354,6 +412,11 @@ maker entry       = 0.1% taker + 0.05% maker + 2 x 0.05% slippage  = 0.25%
 | `--spread-bps` | 5 bps assumed | a synthetic bid and ask around each close |
 
 Fees are charged on both legs, on the filled notional, not once per round trip.
+
+What the bot actually pays today: `LIMIT_ENTRIES=0`, so both legs are market orders
+and a completed round trip costs 0.30%. The maker path exists and is measured in
+[Passive entries](#passive-entries); it ships off because the saving is about a
+seventh of the loss, which is real but not a fix.
 
 The entry gate uses a smaller number on purpose. 0.2% is two takers and nothing
 else: it is the fee-only bound. The 0.30% figure is what a completed round trip
