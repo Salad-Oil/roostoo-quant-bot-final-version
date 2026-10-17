@@ -642,7 +642,6 @@ doing before the submission freezes.
 
 ## License
 
-MIT, see [`LICENSE`](LICENSE). The competition requires the submitted repository to
-be open source, and a public repository without a licence is legally "all rights
-reserved", so this file is what makes that claim true. Swap it for Apache-2.0 or GPL
-if the team prefers, but do not remove it.
+MIT, see [`LICENSE`](LICENSE). Keep it in the repository: without a licence the code
+is "all rights reserved" by default, which is rarely what anyone intends. Swap it for
+Apache-2.0 or GPL if the team prefers, but do not remove it.
