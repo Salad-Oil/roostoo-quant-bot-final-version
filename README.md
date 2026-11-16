@@ -1,79 +1,164 @@
-# Roostoo Quant Trading Strategy
+# Roostoo Momentum Trading Bot
 
-## 1. How we developed the strategy
+A systematic cryptocurrency trading bot built for the Roostoo Quant Trading Hackathon. The strategy targets **short-term momentum continuation** on 30-minute candles, combining directional signals with liquidity filters, volatility-based position sizing, and portfolio risk limits.
 
-### From mean reversion to momentum
+## 1. Strategy design
 
-We started with a mean-reversion idea: buy when a coin falls far below its recent average, and short when it rises far above it. We expected prices to move back toward the average.
+### Capturing momentum continuation
 
-Our early backtests kept losing money. We found that a large price move could keep going instead of reversing soon enough. Trading against that move also meant paying fees while waiting for a recovery.
+Our strategy is built around a simple hypothesis: a strong price move can continue when directional pressure remains active. We look for upward moves that are still strengthening and downward moves that are still extending.
 
-We then tested the opposite direction: go long where the mean-reversion idea would short, and go short where it would buy. This led to our current **momentum continuation strategy**. We buy an upward move only when it is still getting stronger, and short a downward move only when it is still getting weaker.
+To measure that pressure, we express price relative to its rolling 24-hour average using a z-score. A large positive z-score identifies an upward price extension; a large negative z-score identifies a downward extension. We then require the z-score to keep moving in the same direction before entering.
 
-The reported two-year test supports this change. With the template settings, the out-of-sample return improved from −19.25% for mean reversion to −2.51% for momentum. This was an improvement, but it did not yet show a profitable out-of-sample strategy.
+The strategy combines three elements:
 
-### Balancing risk, costs, and participation
+- **Directional strength:** the previous candle's z-score must exceed the entry threshold in the intended direction.
+- **Continuation confirmation:** the current z-score must extend that move by more than the required increment.
+- **Selective participation:** liquidity, ADX, price-distance, and relative-volume filters must pass before a signal reaches the portfolio risk checks.
 
-The competition score is:
+This is a selective momentum approach. The ADX ceiling restricts entries to moves outside the strongest established trend conditions, while the z-score increment confirms short-term directional continuation.
+
+### Balancing returns, risk, and trading costs
+
+The competition score combines three risk-adjusted performance measures:
 
 ```text
 Score = 0.40 × Sortino + 0.30 × Sharpe + 0.30 × Calmar
 ```
 
-These measures reward returns relative to risk, including downside risk and drawdown. We therefore focused on controlled exposure and selective entries, rather than taking large positions or trading as often as possible.
+Our design therefore emphasizes controlled exposure, limited drawdowns, and selective entries. Position sizing uses a loss budget at the initial stop, and portfolio limits constrain concentration and total exposure.
 
-Fees also matter. A market order costs 0.10% per side, so entry and exit together cost 0.20% before slippage. With our backtest assumption of 0.05% slippage per side, the estimated round-trip cost is about 0.30%. Small, frequent trades can lose much of their return to these costs. We therefore require a meaningful price move and use several filters before entering.
+Trading costs also shape the entry rules. The configured taker fee is 0.10% per side. Adding assumed slippage of 0.05% per side gives approximately 0.30% for a market-order round trip before any additional spread effects. The price-distance filter excludes small price extensions, although passing it does not guarantee that a trade will cover its costs.
 
-However, the competition also requires at least eight active trading days. Being too selective could leave us inactive for too long. We made two changes to increase opportunities:
+### Maintaining participation
 
-- **Secondary regime:** after 24 hours without a new entry signal, lower the z-score entry threshold from 2.0 to 1.8. Keep the other filters in place.
-- **Wider universe:** expand the candidate pool from 12 to 16 coins in the team's later deployment, while keeping the same signal filters.
+The competition requires at least eight active trading days. To reduce extended periods without opportunities, the strategy includes a secondary entry regime: after 24 hours without a generated entry signal, the z-score threshold falls from ±2.0 to ±1.8. Continuation confirmation and the remaining filters stay in place.
 
-The goal is to balance trade quality with participation. These changes increase the chance of finding a trade; they do not force trades or guarantee enough active days.
+The timer tracks generated entry signals, not completed trades. Portfolio risk checks can still reject a signal, so this mechanism does not guarantee a minimum number of active days.
 
-We also changed the exits to reduce profit giveback. The strategy now exits when momentum weakens, before waiting for price to cross fully through its average. A trailing stop provides another exit for long positions after a pullback from their peak.
+## 2. Trading rules
 
-## 2. Main trading rules
+The settings below describe the committed `.env.example` configuration. Copying that template to `.env` is necessary to use these settings; internal code defaults differ for several parameters.
 
-### Coin selection and entry filters
+### Universe and signal calculation
 
-We rank tradable coins by their 24-hour turnover and reject spreads above **0.1%**. The later deployment uses a candidate cap of **16 coins**. This is the pool we search for signals, not the number of positions we must hold.
+Tradable pairs are ranked by 24-hour turnover. The configured candidate pool contains up to **12 pairs**, with quoted spreads no wider than **0.1%**. The pool is searched for opportunities; it is not a target number of open positions.
 
-Signals use closed **30-minute candles**. We compare the closing price with its average over **48 candles**, or 24 hours:
+Signals use closed **30-minute candles** and a **48-candle** rolling window, equivalent to 24 hours:
 
 ```text
-Z = (Close − 48-bar average) / 48-bar standard deviation
-ΔZ = current Z − previous Z
+SMA48 = average of the last 48 closing prices
+Std48 = standard deviation of those closing prices
+Z[t]  = (Close[t] − SMA48[t]) / Std48[t]
+ΔZ[t] = Z[t] − Z[t−1]
 ```
 
-| Rule | Setting | Why we use it |
+### Entry conditions
+
+| Rule | Setting | Purpose |
 |---|---|---|
-| Long entry | Previous Z ≥ +2.0 and ΔZ > +0.5 | Buy a strong upward move that is still growing |
-| Short entry | Previous Z ≤ −2.0 and ΔZ < −0.5 | Short a strong downward move that is still growing |
-| ADX filter | ADX(14) < 25 | Avoid the strongest established trends |
-| Price-distance filter | Price is more than 0.6% from its 48-bar average | Avoid very small moves relative to trading costs |
-| Relative-volume filter | Between 1.0 and 3.0 | Require activity within the chosen range |
-| Secondary regime | Use ±1.8 instead of ±2.0 after 24 hours without an entry signal | Reduce long periods without opportunities |
+| Long entry | Z[t−1] ≥ +2.0 and ΔZ[t] > +0.5 | Enter an upward extension with continued directional strength |
+| Short entry | Z[t−1] ≤ −2.0 and ΔZ[t] < −0.5 | Enter a downward extension with continued directional strength |
+| ADX filter | ADX(14) < 25 | Restrict entries outside the strongest established trend conditions |
+| Price-distance filter | Absolute distance from SMA48, divided by the closing price, > 0.6% | Exclude small price extensions |
+| Relative-volume filter | Between 1.0 and 3.0, inclusive | Require volume within the selected activity range |
+| Secondary regime | Entry threshold becomes ±1.8 after 24 hours without an entry signal | Allow more opportunities during prolonged inactivity |
 
-The secondary-regime timer follows **generated entry signals**, not completed trades. A signal may still be rejected by the portfolio risk checks.
+All enabled filters must pass. Short entries are enabled in the template, and every entry remains subject to position sizing and portfolio risk checks.
 
-### Exits and risk control
+### Exits
 
-| Rule | Setting | Why we use it |
+| Rule | Setting | Purpose |
 |---|---|---|
-| Long signal exit | Z ≤ +0.75 | Leave when upward momentum weakens |
-| Short signal exit | Z ≥ −0.75 | Leave when downward momentum weakens |
-| Initial stop | 2.5 × ATR(14) from entry | Set the stop using recent volatility |
-| Long trailing stop | Exit after a 3% fall from the tracked peak | Reduce giveback after a favorable move |
-| Time limit | 49 bars, about 24.5 hours | Limit how long capital stays in one trade |
-| Risk per trade | Size against a 0.5% NAV loss budget at the stop | Keep planned trade risk small |
-| Position limits | Up to 4 positions, each capped at 15% NAV; gross exposure capped at 60% | Limit concentration and total exposure |
-| Daily loss limit | A 2% daily loss stops new entries for that risk day | Prevent further risk-taking after losses |
-| Portfolio drawdown limit | At 20% drawdown, halt and work to close positions | Provide an emergency portfolio limit |
-| Cooldown | Wait two bars after an exit | Avoid immediate re-entry |
+| Long signal exit | Z ≤ +0.75 | Exit as upward momentum fades |
+| Short signal exit | Z ≥ −0.75 | Exit as downward momentum fades |
+| Initial stop | 2.5 × ATR(14) from entry | Adapt the initial stop distance to recent volatility |
+| Long trailing stop | 3% decline from the tracked peak | Limit giveback after a favorable move |
+| Maximum holding period | 49 bars, approximately 24.5 hours | Bound the time allocated to a position |
+| Re-entry cooldown | Two bars after an exit | Avoid immediate re-entry in the same pair |
 
-The earlier code-default Z exits were −0.25 for longs and +0.25 for shorts. Moving them to +0.75 and −0.75 allows an earlier exit as momentum fades. The 3% trailing stop applies only to longs in the current code. These exits aim to protect gains, but cannot guarantee a profitable trade.
+The trailing stop applies to long positions only. Signal exits, stops, and holding limits work together; none guarantees a profitable exit or a fill at the intended price.
 
-Position size also depends on the stop distance. The bot can take less than the position cap, and fees or price gaps can make the actual loss larger than the planned loss budget.
+### Position sizing and portfolio limits
 
-**Configuration note:** the position limits above are verified in the committed code and template. The committed universe cap is still 12; the 16-coin setting is the team's later reported deployment change. A server-only change to eight positions at 10% each is not present in the reviewed repository.
+| Control | Setting |
+|---|---|
+| Planned risk per trade | 0.5% of portfolio net asset value (NAV), sized using the initial stop distance |
+| Maximum position weight | 15% of NAV per pair |
+| Maximum open positions | 4 |
+| Maximum gross exposure | 60% of NAV |
+| Daily loss limit | 2%; halt new entries for the risk day |
+| Risk-day boundary | Midnight UTC+8 |
+| Portfolio drawdown limit | 20%; halt trading and attempt to close positions |
+| Missing stop information | Refuse entry when a configured stop distance cannot be computed |
+
+Position size is constrained by both the stop-based risk budget and portfolio caps. Fees, gaps, and execution slippage can make realized losses larger than the planned loss budget.
+
+## 3. Running the bot
+
+### Set up
+
+```bash
+git clone https://github.com/Salad-Oil/roostoo-quant-bot-final-version.git
+cd roostoo-quant-bot-final-version
+python3 -m venv .venv
+source .venv/bin/activate
+python -m pip install -r requirements.txt
+cp .env.example .env
+```
+
+The bot core uses the Python standard library. Edit `.env` to configure credentials, pairs, strategy parameters, and risk limits. Keep API credentials out of version control.
+
+### Run the built-in simulator
+
+```bash
+python run_live.py --mock --cycles 20
+```
+
+### Backtest historical candles
+
+```bash
+python run_backtest.py --data-dir data --oos-frac 0.25
+```
+
+The backtester holds out the final 25% of the timeline for out-of-sample evaluation and writes results to `reports/`. Use historical data with aligned coverage across pairs when comparing configurations. The small sample files in `data/` are suitable for checking the workflow, not establishing strategy performance.
+
+### Check connectivity and start live execution
+
+After entering the Roostoo credentials in `.env`, run the read-only connectivity check:
+
+```bash
+python run_live.py --check
+```
+
+Start the trading loop with:
+
+```bash
+python run_live.py
+```
+
+Live execution can place orders. Review the configured risk limits and connectivity results before starting it.
+
+## 4. Evaluation approach
+
+We evaluate the momentum strategy using return, drawdown, Sharpe, Sortino, Calmar, trading costs, and activity. Out-of-sample results are assessed separately from the data used for parameter selection.
+
+The design hypothesis is not evidence of profitability. Evaluation must account for fees, spread, slippage, execution delay, and differences between simulated and live fills. Parameter settings should be judged by their out-of-sample behavior and risk profile.
+
+## 5. Repository structure
+
+| Path | Contents |
+|---|---|
+| `roostoo/` | Strategy signals, trading engine, risk controls, exchange client, and backtesting components |
+| `run_live.py` | Live trading loop, simulator mode, and connectivity checks |
+| `run_backtest.py` | Historical backtesting and out-of-sample evaluation |
+| `run_sweep.py` | Parameter sweep runner |
+| `scripts/` | Data collection and supporting utilities |
+| `tests/` | Automated tests |
+| `deploy/` | Deployment resources |
+| `.env.example` | Configuration template |
+| `reports/` | Committed research and backtest outputs |
+
+## License
+
+This project is licensed under the [MIT License](LICENSE).
